@@ -945,7 +945,7 @@ def _task_type_bonus(name: str, task_type: str, sc: Dict) -> float:
 
 
 def _route(query: str, strategy: str,
-           force_mimo: bool = True, force_deepseek: bool = False,
+           force_mimo: bool = False, force_deepseek: bool = False,
            estimated_tokens: int = 0) -> Optional[Dict]:
     pool = _build_pool()
     if not pool:
@@ -1509,7 +1509,7 @@ def handle_post_llm_call(**kwargs) -> None:
 def handle_model_route(args: Dict, **kwargs) -> str:
     query = args.get("query", "")
     strategy = args.get("strategy") or _get_current_strategy()
-    force_mimo = args.get("force_mimo", True)
+    force_mimo = args.get("force_mimo", False)  # 修复：默认不强制使用 MiMo
     force_deepseek = args.get("force_deepseek", False)
 
     result = _route(query, strategy, force_mimo=force_mimo, force_deepseek=force_deepseek)
