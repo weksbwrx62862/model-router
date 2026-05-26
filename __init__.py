@@ -249,8 +249,16 @@ _FEEDBACK_TTL: float = 86400.0  # 24 小时衰减
 _feedback_lock = threading.Lock()
 
 
-def record_model_feedback(model_name: str, success: bool, token_usage: int = 0) -> None:
-    """AMA 执行后调用：记录模型成功/失败，影响后续评分"""
+def record_model_feedback(model_name: str, success: bool, token_usage: int = 0, task_type: str = "chat", complexity: int = 3) -> None:
+    """AMA 执行后调用：记录模型成功/失败，影响后续评分
+    
+    参数:
+        model_name: 模型名称
+        success: 是否成功
+        token_usage: token 使用量
+        task_type: 任务类型
+        complexity: 复杂度 (1-5)
+    """
     import time as _time
     with _feedback_lock:
         if model_name not in _model_feedback:
@@ -273,6 +281,24 @@ def record_model_feedback(model_name: str, success: bool, token_usage: int = 0) 
             fb["penalty"] += 0.3  # 失败加 penalty
         fb["total_tokens"] += token_usage
         fb["last_time"] = _time.time()
+
+    # ── Q-learning 奖励记录 ──
+    use_rl = _load_config().get("use_rl_router", False)
+    if use_rl:
+        try:
+            from .rl_router import rl_record_reward
+            # 计算奖励值：成功 +1.0，失败 -1.0，根据 token 使用量调整
+            reward = 1.0 if success else -1.0
+            # token 使用量调整：高效使用奖励，低效使用惩罚
+            if token_usage > 0:
+                # 假设 1000 tokens 为基准
+                efficiency = min(1.0, 1000.0 / token_usage)
+                reward *= (0.5 + 0.5 * efficiency)
+            
+            rl_record_reward(model_name, reward, task_type, complexity)
+            logger.debug("Q-learning 记录奖励: model=%s, reward=%.2f", model_name, reward)
+        except Exception as e:
+            logger.debug("Q-learning 奖励记录失败: %s", e)
 
 
 def get_model_feedback_score(model_name: str) -> float:
@@ -1012,6 +1038,35 @@ def _route(query: str, strategy: str,
         _matrix_strategy = "auto"
     if not force_mimo and not force_deepseek and _matrix_strategy in ("cheapest", "fastest", "smartest", "auto"):
         strategy = _matrix_strategy
+
+    # ── Q-learning 路由（如果启用） ──
+    use_rl = _load_config().get("use_rl_router", False)
+    if use_rl:
+        try:
+            from .rl_router import rl_select_model
+            rl_result, rl_reason = rl_select_model(pool, task_type, complexity, strategy)
+            if rl_result:
+                _set_active_model(rl_result)
+                return {
+                    "name": rl_result["name"], "provider": rl_result["provider"],
+                    "model": rl_result["model"], "base_url": rl_result["base_url"],
+                    "key": rl_result.get("key", ""), "key_masked": _mask_key(rl_result.get("key", "")),
+                    "strategy": f"rl_{strategy}",
+                    "complexity": complexity, "task_type": task_type,
+                    "pool_size": len(pool),
+                    "alternatives": [m["name"] for m in pool if m["name"] != rl_result["name"]][:3],
+                    "score_breakdown": {rl_result["name"]: rl_reason},
+                    "fallback_chain": [],
+                    "time_info": {
+                        "beijing_time": _beijing_now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "is_off_peak": off_peak,
+                        "period": "非高峰期（0.8x 系数）" if off_peak else "高峰期",
+                    },
+                    "selection_reason": rl_reason,
+                    "rl_enabled": True,
+                }
+        except Exception as e:
+            logger.warning("Q-learning 路由失败，降级到传统路由: %s", e)
 
     scored = [(m, _score(m, strategy, complexity, off_peak, force_mimo, force_deepseek, task_type)) for m in pool]
     scored.sort(key=lambda x: -x[1])
